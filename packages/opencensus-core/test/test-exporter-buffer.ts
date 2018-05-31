@@ -26,7 +26,7 @@ import {Tracer} from '../src/trace/model/tracer';
 
 const exporter = new NoopExporter();
 const DEFAULT_BUFFER_SIZE = 3;
-const DEFAULT_BUFFER_TIMEOUT = 2000;  // time in milliseconds
+const DEFAULT_BUFFER_TIMEOUT = 200;  // time in milliseconds
 const tracer = new Tracer().start({});
 
 const defaultBufferConfig = {
@@ -49,7 +49,8 @@ const createRootSpans = (num: number): RootSpan[] => {
   return rootSpans;
 };
 
-describe('ExporterBuffer', () => {
+describe('ExporterBuffer', function() {
+  this.timeout(0);
   /**
    * Should create a Buffer with exporter, DEFAULT_BUFFER_SIZE and
    * DEFAULT_BUFFER_TIMEOUT
@@ -105,12 +106,13 @@ describe('ExporterBuffer', () => {
    * Should flush by timeout
    */
   describe('addToBuffer force flush by timeout ', () => {
-    it('should flush by timeout', () => {
+    it('should flush by timeout', (done) => {
       const buffer = new ExporterBuffer(exporter, defaultBufferConfig);
       buffer.addToBuffer(new RootSpan(tracer));
       assert.strictEqual(buffer.getQueue().length, 1);
       setTimeout(() => {
         assert.strictEqual(buffer.getQueue().length, 0);
+        done();
       }, DEFAULT_BUFFER_TIMEOUT + 100);
     });
   });
