@@ -1,5 +1,5 @@
 /**
- * Copyright 2018 OpenCensus Authors.
+ * Copyright 2018, OpenCensus Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,83 +16,100 @@
 
 import {types} from '@opencensus/opencensus-core';
 import {classes} from '@opencensus/opencensus-core';
+import {logger} from '@opencensus/opencensus-core';
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as mocha from 'mocha';
+import * as nock from 'nock';
+import * as shimmer from 'shimmer';
 
-import {JaegerTraceExporter} from '../src/jaeger';
-import {JaegerTraceExporterOptions} from '../src/options';
-import * as constants from '../src/jaeger-driver/constants';
 
-/** Jaeger tests */
-describe('Jaeger Exporter', () => {
+import {JaegerTraceExporter, JaegerTraceExporterOptions} from '../src/';
+import UDPSender from '../src/jaeger-driver/udp_sender';
 
+const DEFAULT_BUFFER_TIMEOUT = 10;  // time in milliseconds
+
+/**
+ * Controls if the tests will use a real network or not
+ * true to use a real zipkin service
+ * false to use a nock server
+ */
+const OPENCENSUS_NETWORK_TESTS =
+    ['true', 'TRUE', '1'].indexOf(process.env.OPENCENSUS_NETWORK_TESTS) > -1;
+
+
+describe('Jeager Exporter', () => {
+  const testLogger = logger.logger('debug');
+  const dryrun = !OPENCENSUS_NETWORK_TESTS;
+  let exporterOptions: JaegerTraceExporterOptions;
   let exporter: JaegerTraceExporter;
   let tracer: classes.Tracer;
 
-  beforeEach(() => {
-    const exporterOptions = {
-      serviceName: 'opencensus-service',
-      tags: [ { key: 'opencensus-service.version', value: '1.1.2' }],
-      bufferTimeout: 2000,
-      maxPacketSize: 600
-    } as JaegerTraceExporterOptions;
 
+  before(() => {
+    if (dryrun) {
+      mockUDPSender();
+    }
+    testLogger.debug('dryrun=%s', dryrun);
+    exporterOptions = {
+      serviceName: 'opencensus-exporter-jaeger',
+      host: 'localhost',
+      port: 6832,
+      tags: [{key: 'opencensus-exenvporter-jeager', value: '0.0.1'}],
+      bufferTimeout: DEFAULT_BUFFER_TIMEOUT,
+      logger: testLogger,
+      maxPacketSize: 1000
+    } as JaegerTraceExporterOptions;
+  });
+
+  beforeEach(() => {
     exporter = new JaegerTraceExporter(exporterOptions);
     tracer = new classes.Tracer();
-
-    tracer.registerSpanEventListener(exporter);
     tracer.start({samplingRate: 1});
+    tracer.registerSpanEventListener(exporter);
   });
 
-  /** Should called when a rootSpan ended */
-  describe('onEndSpan()', () => {
-    it('Should called when a rootSpan ended', () => {
-      const rootSpanOptions = {name: 'root-test'};
-      tracer.startRootSpan(rootSpanOptions, (rootSpan) => {
-        const span = rootSpan.startChildSpan('spanTest', 'spanType');
-        span.end();
-        rootSpan.end();
-        assert.ok(true);
-      });
-    });
+  afterEach(() => {
+    exporter.close();
   });
 
-  /** Should send traces to Jaeger service */
+
+  /* Should export spans to Jeager */
   describe('publish()', () => {
-    it('should send traces to Jaeger service', () => {
-      return tracer.startRootSpan({name: 'root-test'}, (rootSpan) => {
-        
-        const span = rootSpan.startChildSpan('spanTest', 'spanType');
+    it('should export spans to Jeager', () => {
+      return tracer.startRootSpan({name: 'root-s01'}, async (rootSpan) => {
+        const span = tracer.startChildSpan('child-s01');
         span.end();
-        
         rootSpan.end();
-        
-        return exporter.publish([rootSpan]).then((result: string) => {
-          if (result && result === 'sendTrace sucessfully'){
-            assert.ok(true);
-          } else {
-            assert.ok(false);
-          }
+
+        return exporter.publish([rootSpan]).then((result) => {
+          assert.strictEqual(result, 2);
         });
       });
     });
+  });
 
-    it('should send traces with attributes to Jaeger service', () => {
-      return tracer.startRootSpan({name: 'root-test'}, (rootSpan) => {
-        const span = rootSpan.startChildSpan('spanTest', 'spanType');
-        span.addAttribute(constants.SAMPLER_TYPE_TAG_KEY, constants.SAMPLER_TYPE_CONST);
-        span.addAttribute(constants.SAMPLER_PARAM_TAG_KEY, 'true');
+
+  describe('addToBuffer force flush by timeout ', () => {
+    it('should flush by timeout', (done) => {
+      assert.strictEqual(exporter.spanBuffer.length, 0);
+      tracer.startRootSpan({name: 'root-s02'}, (rootSpan) => {
+        const span = tracer.startChildSpan('child-s02');
         span.end();
         rootSpan.end();
-        
-        return exporter.publish([rootSpan]).then((result: string) => {
-          if (result && result === 'sendTrace sucessfully'){
-            assert.ok(true);
-          } else {
-            assert.ok(false);
-          }
-        });
+
+        assert.strictEqual(exporter.successBuffer.length, 0);
+        setTimeout(() => {
+          assert.strictEqual(exporter.successBuffer.length, 2);
+          done();
+        }, DEFAULT_BUFFER_TIMEOUT * 2 + 100);
       });
     });
   });
 });
+
+function mockUDPSender() {
+  shimmer.wrap(UDPSender.prototype, 'flush', (original) => {
+    return (callback) => callback(2);
+  });
+}

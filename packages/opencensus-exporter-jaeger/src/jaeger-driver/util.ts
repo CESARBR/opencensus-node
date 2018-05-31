@@ -1,24 +1,31 @@
 // @flow
 // Copyright (c) 2016 Uber Technologies, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
-// in compliance with the License. You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not
+// use this file except in compliance with the License. You may obtain a copy of
+// the License at
 //
 // http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+// License for the specific language governing permissions and limitations under
 // the License.
-/*tslint:disable*/
 
-import * as xorshift from 'xorshift';
+// Original file from Jaeger Bindings for Javascript OpenTracing API
+// https://github.com/jaegertracing/jaeger-client-node/
+
+/* tslint:disable */
+
+import * as http from 'http';
 import * as Int64 from 'node-int64';
 import * as os from 'os';
-import * as http from 'http';
+import * as xorshift from 'xorshift';
+
 import {Tag} from './jaeger-thrift';
 
-export class Utils {
+export default class Utils {
   /**
    * Determines whether a string contains a given prefix.
    *
@@ -59,7 +66,7 @@ export class Utils {
    * @return {number} - a 32-bit number where each byte represents an
    * octect of an ip address.
    **/
-  static ipToInt(ip: string): number | null {
+  static ipToInt(ip: string): number {
     let ipl = 0;
     let parts = ip.split('.');
     if (parts.length != 4) {
@@ -128,38 +135,39 @@ export class Utils {
     for (let key in dict) {
       let value = dict[key];
       if (dict.hasOwnProperty(key)) {
-        tags.push({ key: key, value: value });
+        tags.push({key: key, value: value});
       }
     }
 
     return tags;
   }
 
-  static httpGet(host: string, port: number, path: string, success: Function, error: Function) {
-    http
-      .get(
-        {
-          host: host,
-          port: port,
-          path: path,
-        },
-        res => {
-          // explicitly treat incoming data as utf8 (avoids issues with multi-byte chars)
-          res.setEncoding('utf8');
+  static httpGet(
+      host: string, port: number, path: string, success: Function,
+      error: Function) {
+    http.get(
+            {
+              host: host,
+              port: port,
+              path: path,
+            },
+            res => {
+              // explicitly treat incoming data as utf8 (avoids issues with
+              // multi-byte chars)
+              res.setEncoding('utf8');
 
-          // incrementally capture the incoming response body
-          let body = '';
-          res.on('data', chunk => {
-            body += chunk;
-          });
+              // incrementally capture the incoming response body
+              let body = '';
+              res.on('data', chunk => {
+                body += chunk;
+              });
 
-          res.on('end', () => {
-            success(body);
-          });
-        }
-      )
-      .on('error', err => {
-        error(err);
-      });
+              res.on('end', () => {
+                success(body);
+              });
+            })
+        .on('error', err => {
+          error(err);
+        });
   }
 }

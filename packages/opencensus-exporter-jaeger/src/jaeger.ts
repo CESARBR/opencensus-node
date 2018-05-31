@@ -1,5 +1,5 @@
 /**
- * Copyright 2018, OpenCensus Authors *
+ * Copyright 2018, OpenCensus Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,123 +14,184 @@
  * limitations under the License.
  */
 
-import { types } from '@opencensus/opencensus-core';
-import { classes } from '@opencensus/opencensus-core';
-import { logger } from '@opencensus/opencensus-core';
-import { Thrift } from 'thriftrw';
-import * as http from 'http';
-import * as url from 'url';
+import {classes, logger, types} from '@opencensus/opencensus-core';
 import * as os from 'os';
-import * as path from 'path';
-import * as process from 'process';
 
+import {Process, Tag} from './jaeger-driver/jaeger-thrift';
+import ThriftUtils from './jaeger-driver/thrift';
 import UDPSender from './jaeger-driver/udp_sender';
-import { Utils } from './jaeger-driver/util';
-import { ThriftUtils } from './jaeger-driver/thrift';
-import { Process, Tag } from './jaeger-driver/jaeger-thrift';
-import * as constants from './jaeger-driver/constants';
-import { JaegerTraceExporterOptions } from './options';
-import { spawnSync } from 'child_process';
+import Utils from './jaeger-driver/util';
 
-/** Jaeger Exporter manager class */
+/**
+ * Options for Jaeger configuration
+ */
+export interface JaegerTraceExporterOptions extends types.ExporterConfig {
+  serviceName: string;
+  tags?: Tag[];
+  host?: string;
+  port?: number;
+  maxPacketSize?: number;
+}
+
+
+/** Format and sends span information to Jaeger */
 export class JaegerTraceExporter implements types.Exporter {
+  // Name of the tag used to report client version.
+  static JAEGER_OPENCENSUS_EXPORTER_VERSION_TAG_KEY =
+      'opencensus.exporter.jaeger.version';
+  // host name of the process.
+  static TRACER_HOSTNAME_TAG_KEY = 'opencensus.exporter.jaeger.hostname';
+  //  ip of the process.
+  static PROCESS_IP = 'ip';
 
-  process: Process;
-  exporterBuffer: classes.ExporterBuffer;
-  logger: types.Logger;
-  failBuffer: types.SpanContext[] = [];
-  sender: UDPSender;
+  private process: Process;
+  private logger: types.Logger;
+  private sender: UDPSender;
+  checkCallback?: (exporter: JaegerTraceExporter) => void;
+  spanBuffer: types.Span[] = [];
+  successBuffer: types.Span[] = [];
+  /** Timeout control */
+  /** Max time for a buffer can wait before being sent */
+  private bufferTimeout: number;
+  /** Manage when the buffer timeout needs to be reseted */
+  private resetTimeout = false;
+  /** Indicates when the buffer timeout is running */
+  private timeoutSet = false;
+
 
   constructor(options: JaegerTraceExporterOptions) {
+    const pjson = require('../../package.json');
     this.logger = options.logger || logger.logger('debug');
-    this.exporterBuffer = new classes.ExporterBuffer(this, options);
+    this.bufferTimeout = options.bufferTimeout;
     this.sender = new UDPSender(options);
-
-    const thriftTags = this.getThriftTags(options.tags);
+    const tags = options.tags || [];
+    tags[JaegerTraceExporter.JAEGER_OPENCENSUS_EXPORTER_VERSION_TAG_KEY] =
+        `opencensus-exporter-jaeger-${pjson.version}`;
+    tags[JaegerTraceExporter.TRACER_HOSTNAME_TAG_KEY] = os.hostname();
+    tags[JaegerTraceExporter.PROCESS_IP] = Utils.ipToInt(Utils.myIp());
 
     this.process = {
       serviceName: options.serviceName,
-      tags: thriftTags
+      tags: options.tags ? ThriftUtils.getThriftTags(tags) : [],
     };
     this.sender.setProcess(this.process);
   }
 
-  private getThriftTags(optionsTags: Tag[]) {
-    let hostTags = [
-      { 'key': constants.JAEGER_CLIENT_VERSION_TAG_KEY, 'value': `Node-${process.version}` },
-      { 'key': constants.TRACER_HOSTNAME_TAG_KEY, 'value': os.hostname() },
-      { 'key': constants.PROCESS_IP, 'value': Utils.myIp() }
-    ];
+  /**
+   * Is called whenever a span is ended.
+   * @param root the ended span
+   */
+  onEndSpan(root: types.RootSpan) {
+    this.logger.debug('onEndSpan: adding rootSpan: %s', root.name);
+    this.addSpanToSenderBuffer(root)
+        .then(result => {
+          this.addToBuffer(root, result as number);
+          for (const span of root.spans) {
+            this.addSpanToSenderBuffer(span)
+                .then(result => {
+                  this.addToBuffer(span, result as number);
+                })
+                .catch(err => {
+                  return;
+                });
+          }
+        })
+        .catch(err => {
+          return;
+        });
 
-    if (optionsTags != null) {
-      hostTags = hostTags.concat(optionsTags);
-    }
-    return optionsTags ? ThriftUtils.getThriftTags(hostTags) : [];
+    // Set a buffer timeout
+    this.setBufferTimeout();
   }
 
   /** Not used for this exporter */
-  onStartSpan(root: types.RootSpan) { }
+  onStartSpan(root: types.RootSpan) {}
 
-  onEndSpan(root: types.RootSpan) {
-    for (const span of root.spans) {
-      this.sender.append(this.translateSpanToThrift(span), (numSpans, error) => {
-        if (error) {
-          console.log(error);
-        }
-        console.log('ok');
-      });
+  private addToBuffer(span: types.Span, numSpans: number) {
+    if (numSpans > 0) {
+      this.successBuffer = this.successBuffer.concat(this.spanBuffer);
+      if (numSpans === this.spanBuffer.length) {
+        this.spanBuffer = [span];
+      } else {
+        this.spanBuffer = [];
+      }
+    } else {
+      this.logger.debug('adding to buffer %s', span.name);
+      this.spanBuffer.push(span);
     }
   }
 
-  private sendTrace(traces) {
+  private addSpanToSenderBuffer(span: types.Span) {
+    const thriftSpan = ThriftUtils.spanToThrift(span);
     return new Promise((resolve, reject) => {
-      this.sender.flush((numSpans, err) => {
+      this.sender.append(thriftSpan, (numSpans: number, err?: string) => {
         if (err) {
-          const errorMsg = `sendTrace error: ${err}`;
-          this.logger.error(errorMsg);
-          reject(errorMsg);
+          this.logger.error(`failed to add span: ${err}`);
+          reject(-1);
         } else {
-          const successMsg = 'sendTrace sucessfully';
-          this.logger.debug(successMsg);
-          resolve(successMsg);
+          this.logger.debug('successful append for : %s', numSpans);
+          resolve(numSpans);
         }
       });
     });
   }
 
+  /**
+   * Publishes a list of root spans to Jaeger.
+   * @param rootSpans
+   */
   publish(rootSpans: types.RootSpan[]) {
-    return this.sendTrace(rootSpans).catch((err) => {
-      return err;
+    this.logger.debug('JeagerExport publishing');
+    for (const root of rootSpans) {
+      if (this.spanBuffer.indexOf(root) <= 0) {
+        this.onEndSpan(root);
+      }
+    }
+    return this.flush();
+  }
+
+  private flush() {
+    return new Promise((resolve, reject) => {
+      try {
+        this.sender.flush((numSpans: number, err?: string) => {
+          if (err) {
+            this.logger.error(`failed to flush span: ${err}`);
+            resolve(-1);
+          } else {
+            this.logger.debug('successful flush for : %s', numSpans);
+            this.successBuffer = this.successBuffer.concat(this.spanBuffer);
+            this.spanBuffer = [];
+            resolve(numSpans);
+          }
+        });
+      } catch (err) {
+        this.logger.error(`failed to flush span: ${err}`);
+        resolve(-1);
+      }
+      if (this.checkCallback) {
+        this.checkCallback(this);
+      }
     });
   }
 
-  private translateAttributesToSpanTags(span: types.Span) {
-    let tags = [];
-    if (span.attributes) {
-      const initialTags = [];
-      Object.keys(span.attributes).forEach(key => {
-        initialTags.push({ 'key': key, 'value': span.attributes[key] });
-      });
-      tags = ThriftUtils.getThriftTags(initialTags);
-    }
-    return tags;
+  close() {
+    this.sender.close();
   }
 
-  private translateSpanToThrift(span: types.Span) {
-    const parentSpanId = span.parentSpanId ? new Buffer(span.parentSpanId) : ThriftUtils.emptyBuffer;
+  /** Start the buffer timeout, when finished calls flush method */
+  private setBufferTimeout() {
+    this.logger.debug('JeagerExporter: set timeout');
+    if (this.timeoutSet) {
+      return;
+    }
+    this.timeoutSet = true;
 
-    return {
-      traceIdLow: Utils.encodeInt64(span.traceId),
-      traceIdHigh: ThriftUtils.emptyBuffer,
-      spanId: Utils.getRandom64(),  // new Buffer(span.id),
-      parentSpanId: Utils.encodeInt64(parentSpanId),
-      operationName: span.name,
-      references: [],
-      flags: 1,
-      startTime: Utils.encodeInt64(span.startTime.getTime() * 1000), // to microsseconds
-      duration: Utils.encodeInt64(span.duration * 1000),  // to microsseconds
-      tags: this.translateAttributesToSpanTags(span),
-      logs: []
-    };
+    setTimeout(() => {
+      if (this.spanBuffer.length === 0) {
+        return;
+      }
+      this.timeoutSet = false;
+      this.publish([]);
+    }, this.bufferTimeout);
   }
 }

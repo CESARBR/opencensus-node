@@ -14,5 +14,4 @@
  * limitations under the License.
  */
 
-export * from './options';
 export * from './jaeger';

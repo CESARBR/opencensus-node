@@ -1,28 +1,35 @@
 // @flow
 // Copyright (c) 2016 Uber Technologies, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
-// in compliance with the License. You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not
+// use this file except in compliance with the License. You may obtain a copy of
+// the License at
 //
 // http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+// License for the specific language governing permissions and limitations under
 // the License.
-/*tslint:disable*/
+
+// Original file from Jaeger Bindings for Javascript OpenTracing API
+// https://github.com/jaegertracing/jaeger-client-node/
+
+/* tslint:disable */
 
 import {types} from '@opencensus/opencensus-core';
-
 import * as fs from 'fs';
 import * as path from 'path';
-import { Thrift } from 'thriftrw';
-import {Tag, LogData, Reference} from './jaeger-thrift';
-import {Utils} from './util';
+import {Thrift} from 'thriftrw';
 
-export class ThriftUtils {
+import {LogData, Reference, Tag} from './jaeger-thrift';
+import Utils from './util.js';
+
+export default class ThriftUtils {
   static _thrift = new Thrift({
-    source: fs.readFileSync(path.join(__dirname, './jaeger-idl/thrift/jaeger.thrift'), 'ascii'),
+    source: fs.readFileSync(
+        path.join(__dirname, './jaeger-idl/thrift/jaeger.thrift'), 'ascii'),
     allowOptionalArguments: true,
   });
   static emptyBuffer: Buffer = new Buffer([0, 0, 0, 0, 0, 0, 0, 0]);
@@ -82,7 +89,7 @@ export class ThriftUtils {
     for (let i = 0; i < logs.length; i++) {
       let log = logs[i];
       thriftLogs.push({
-        timestamp: Utils.encodeInt64(log.timestamp * 1000), // to microseconds
+        timestamp: Utils.encodeInt64(log.timestamp * 1000),  // to microseconds
         fields: ThriftUtils.getThriftTags(log.fields),
       });
     }
@@ -116,23 +123,33 @@ export class ThriftUtils {
     return thriftRefs;
   }
 
- static spanToThrift(span: types.Span|types.RootSpan, tags): any {
-    const thriftTags = ThriftUtils.getThriftTags(tags);
-    // let logs = ThriftUtils.getThriftLogs(span._logs);
-    const parentId = span.parentSpanId == null? "": Utils.encodeInt64(span.parentSpanId);
+  static spanToThrift(span: types.Span): any {
+    let tags = [];
+    if (span.attributes) {
+      const spanTags = [];
+      Object.keys(span.attributes).forEach(key => {
+        spanTags.push({'key': key, 'value': span.attributes[key]});
+      });
+      tags = ThriftUtils.getThriftTags(spanTags);
+    }
+
+    const logs = [];  // ThriftUtils.getThriftLogs(span.logs);
+    let unsigned = true;
+    const length = span.spanContext.traceId.length;
 
     return {
-      traceIdLow: Utils.encodeInt64(span.traceId),
-      traceIdHigh: ThriftUtils.emptyBuffer, // TODO(oibe) implement 128 bit ids
-      spanId: Utils.encodeInt64(span.id),
-      parentSpanId: parentId || ThriftUtils.emptyBuffer,
+      traceIdLow: Utils.encodeInt64(span.spanContext.traceId),
+      traceIdHigh: ThriftUtils.emptyBuffer,  // TODO(oibe) implement 128 bit ids
+      spanId: Utils.encodeInt64(span.spanContext.spanId),
+      parentSpanId: span.parentSpanId || ThriftUtils.emptyBuffer,
       operationName: span.name,
-      references: [], // ThriftUtils.spanRefsToThriftRefs(span._references),
-      flags: 1,
-      startTime: Utils.encodeInt64(span.startTime.getTime() * 1000), // to microseconds
-      duration: Utils.encodeInt64(span.duration * 1000), // to microseconds
-      tags: thriftTags,
-      logs: [] //logs,
+      references: [],  // ThriftUtils.spanRefsToThriftRefs(span.references),
+      flags: span.spanContext.options || 0x1,
+      startTime: Utils.encodeInt64(
+          span.startTime.getTime() * 1000),               // to microseconds
+      duration: Utils.encodeInt64(span.duration * 1000),  // to microseconds
+      tags: tags,
+      logs: logs,
     };
   }
 }
