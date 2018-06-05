@@ -29,6 +29,11 @@ import UDPSender from '../src/jaeger-driver/udp_sender';
 
 const DEFAULT_BUFFER_TIMEOUT = 10;  // time in milliseconds
 
+import {LengthResult} from '../src/jaeger-driver/bufrw';
+import {Batch, Process} from '../src/jaeger-driver/jaeger-thrift';
+import {SenderCallback} from '../src/jaeger-driver/reporter';
+
+
 /**
  * Controls if the tests will use a real network or not
  * true to use a real zipkin service
@@ -38,7 +43,7 @@ const OPENCENSUS_NETWORK_TESTS =
     ['true', 'TRUE', '1'].indexOf(process.env.OPENCENSUS_NETWORK_TESTS) > -1;
 
 
-describe('Jeager Exporter', () => {
+describe('Jaeger Exporter', () => {
   const testLogger = logger.logger('debug');
   const dryrun = !OPENCENSUS_NETWORK_TESTS;
   let exporterOptions: JaegerTraceExporterOptions;
@@ -47,15 +52,12 @@ describe('Jeager Exporter', () => {
 
 
   before(() => {
-    if (dryrun) {
-      mockUDPSender();
-    }
     testLogger.debug('dryrun=%s', dryrun);
     exporterOptions = {
       serviceName: 'opencensus-exporter-jaeger',
       host: 'localhost',
       port: 6832,
-      tags: [{key: 'opencensus-exenvporter-jeager', value: '0.0.1'}],
+      tags: [{key: 'opencensus-exporter-jeager', value: '0.0.1'}],
       bufferTimeout: DEFAULT_BUFFER_TIMEOUT,
       logger: testLogger,
       maxPacketSize: 1000
@@ -64,6 +66,9 @@ describe('Jeager Exporter', () => {
 
   beforeEach(() => {
     exporter = new JaegerTraceExporter(exporterOptions);
+    if (dryrun) {
+      mockUDPSender(exporter);
+    }
     tracer = new classes.Tracer();
     tracer.start({samplingRate: 1});
     tracer.registerSpanEventListener(exporter);
@@ -77,7 +82,7 @@ describe('Jeager Exporter', () => {
   /* Should export spans to Jeager */
   describe('publish()', () => {
     it('should export spans to Jeager', () => {
-      return tracer.startRootSpan({name: 'root-s01'}, async (rootSpan) => {
+      return tracer.startRootSpan({name: 'root-s01'}, (rootSpan) => {
         const span = tracer.startChildSpan('child-s01');
         span.end();
         rootSpan.end();
@@ -92,15 +97,15 @@ describe('Jeager Exporter', () => {
 
   describe('addToBuffer force flush by timeout ', () => {
     it('should flush by timeout', (done) => {
-      assert.strictEqual(exporter.spanBuffer.length, 0);
+      assert.strictEqual(exporter.queue.length, 0);
       tracer.startRootSpan({name: 'root-s02'}, (rootSpan) => {
         const span = tracer.startChildSpan('child-s02');
         span.end();
         rootSpan.end();
 
-        assert.strictEqual(exporter.successBuffer.length, 0);
+        assert.strictEqual(exporter.successCount, 0);
         setTimeout(() => {
-          assert.strictEqual(exporter.successBuffer.length, 2);
+          assert.strictEqual(exporter.successCount, 2);
           done();
         }, DEFAULT_BUFFER_TIMEOUT * 2 + 100);
       });
@@ -108,8 +113,36 @@ describe('Jeager Exporter', () => {
   });
 });
 
-function mockUDPSender() {
-  shimmer.wrap(UDPSender.prototype, 'flush', (original) => {
-    return (callback) => callback(2);
-  });
+
+function mockUDPSender(exporter: JaegerTraceExporter) {
+  exporter.sender = new MokedUDPSender();
+}
+
+
+class MokedUDPSender extends UDPSender {
+  queue = [];
+
+  // tslint:disable-next-line:no-any
+  constructor(options: any = {}) {
+    super(options);
+  }
+
+  setProcess(process: Process): void {}
+
+  // tslint:disable-next-line:no-any
+  append(span: any, callback?: SenderCallback): void {
+    this.queue.push(span);
+    if (callback) {
+      callback(0);
+    }
+  }
+
+  flush(callback?: SenderCallback): void {
+    if (callback) {
+      callback(this.queue.length);
+      this.queue = [];
+    }
+  }
+
+  close(): void {}
 }
